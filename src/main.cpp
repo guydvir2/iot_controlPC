@@ -1,16 +1,12 @@
 #include <Arduino.h>
 #include <myIOT2.h>
 
-// #define JSON_DOC_SIZE 1200
-// #define ACT_JSON_DOC_SIZE 800
-// #define READ_PARAMTERS_FROM_FLASH true /* Flash or HardCoded Parameters */
-// #define veboseMode true
 #define use_PSU_state false
 
-#define RESET_CMD_GPIO 5
-#define POWER_CMD_GPIO 4
-#define GET_MOTHERBOARD_ON_STATE 12
-#define GET_MOTHERBOARD_POWER_STATE 13
+#define RESET_CMD_GPIO 4
+#define POWER_CMD_GPIO 12
+#define GET_MOTHERBOARD_ON_STATE_GPIO 12
+#define GET_MOTHERBOARD_POWER_STATE_GPIO 13
 
 #define LONG_PRESS_MS 4500
 #define SHORT_PRESS_MS 1000
@@ -19,10 +15,43 @@
 #define POWEROFF_DURATION_MS LONG_PRESS_MS
 #define POWERON_DURATION_MS SHORT_PRESS_MS
 
-#define SWITCH_ON HIGH
-#define SWITCH_OFF !SWITCH_ON
+#define OPEN_SW LOW
+#define CLOSED_SW !OPEN_SW
+#define ON_STATE HIGH
+#define OFF_STATE LOW
+
+// int gpios[] = {4, 12, 13, 14};פם'קרםככ
+
+unsigned long lastCalc = 0;
+const unsigned long calcInterval = 50;
+const char *verApp = "iot_ControlPC_v0.2";
+
+typedef void (*CommandHandler)(void);
+
+void cmd_status();
+void cmd_help();
+void cmd_ver();
+void cmd_poweroff();
+void cmd_poweron();
+void cmd_reset();
+void cmd_debug();
+
+struct Command
+{
+  const char *name;
+  CommandHandler handler;
+} commands[] = {
+    {"status", cmd_status},
+    {"help2", cmd_help},
+    {"ver2", cmd_ver},
+    {"poweroff", cmd_poweroff},
+    {"poweron", cmd_poweron},
+    {"reset_cmd", cmd_reset},
+    {"debug", cmd_debug},
+    {nullptr, nullptr}};
 
 myIOT2 iot;
+
 enum SystemStates
 {
   MOTHERBOARD_NOT_POWERED = 0,
@@ -31,82 +60,85 @@ enum SystemStates
   ERROR_STATE = 3
 };
 SystemStates systemState = MOTHERBOARD_NOT_POWERED;
+
 const char *systemStateStr[] = {"NOT_POWERED", "POWERED", "ON", "ERROR"};
-const char *verApp = "iot_ControlPC_v0.1";
 
 // ~~~~~~~ Init & loop functions ~~~~~~~
 void generic_Press_cmd(uint8_t gpio, int press_duration)
 {
-  digitalWrite(gpio, SWITCH_ON);
+  digitalWrite(gpio, CLOSED_SW);
   delay(press_duration);
-  digitalWrite(gpio, SWITCH_OFF);
+  digitalWrite(gpio, OPEN_SW);
 }
 bool get_powerSW_state()
 {
-  return digitalRead(GET_MOTHERBOARD_POWER_STATE);
+  return digitalRead(POWER_CMD_GPIO);
 }
 bool get_resetSW_state()
 {
-  return digitalRead(GET_MOTHERBOARD_ON_STATE);
+  return digitalRead(RESET_CMD_GPIO);
 }
 bool send_PowerON_cmd()
 {
-  if (get_powerSW_state() == SWITCH_OFF && systemState == MOTHERBOARD_POWERED)
-  {
+  // If PSU monitoring enabled, require power-SW + POWERED state.
+  // If disabled, allow power-on when not already ON.
+  // if ((use_PSU_state && get_powerSW_state() == OPEN_SW && systemState == MOTHERBOARD_POWERED) ||
+  //     (!use_PSU_state && systemState != MOTHERBOARD_ON))
+  // {
     generic_Press_cmd(POWER_CMD_GPIO, POWERON_DURATION_MS);
     return true;
-  }
-  else
-  {
-    return false;
-  }
+  // }
+  // return false;
 }
 bool send_PowerOFF_cmd()
 {
-  if (get_powerSW_state() == SWITCH_OFF && systemState == MOTHERBOARD_ON)
-  {
+  // If PSU monitoring enabled, require power-SW + ON state.
+  // If disabled, allow power-off when the system reports ON.
+  // if ((use_PSU_state && get_powerSW_state() == OPEN_SW && systemState == MOTHERBOARD_ON) ||
+  //     (!use_PSU_state && systemState == MOTHERBOARD_ON))
+  // {
     generic_Press_cmd(POWER_CMD_GPIO, POWEROFF_DURATION_MS);
     return true;
-  }
-  else
-  {
-    return false;
-  }
+  // }
+  // return false;
 }
 bool send_Reset_cmd()
 {
-  if (get_resetSW_state() == SWITCH_OFF && (systemState == MOTHERBOARD_ON || systemState == MOTHERBOARD_POWERED))
-  {
+  // Reset requires reset-SW to be available. If PSU monitoring enabled,
+  // allow reset when ON or POWERED. If disabled, allow only when ON.
+  // if (get_resetSW_state() == OPEN_SW &&
+  //     (systemState == MOTHERBOARD_ON || (use_PSU_state && systemState == MOTHERBOARD_POWERED)))
+  // {
     generic_Press_cmd(RESET_CMD_GPIO, SHORT_PRESS_MS);
-    systemState = MOTHERBOARD_ON;
     return true;
-  }
-  else
-  {
-    return false;
-  }
+  // }
+  // return false;
 }
 bool get_motherboard_ON_state()
 {
-  return digitalRead(GET_MOTHERBOARD_ON_STATE);
+  return digitalRead(GET_MOTHERBOARD_ON_STATE_GPIO);
 }
 bool get_motherboard_POWER_state()
 {
-  return digitalRead(GET_MOTHERBOARD_POWER_STATE);
+  return digitalRead(GET_MOTHERBOARD_POWER_STATE_GPIO);
 }
 
 void init_GPIOs()
 {
   pinMode(RESET_CMD_GPIO, OUTPUT);
   pinMode(POWER_CMD_GPIO, OUTPUT);
-  pinMode(GET_MOTHERBOARD_ON_STATE, INPUT_PULLUP);
-  pinMode(GET_MOTHERBOARD_POWER_STATE, INPUT_PULLUP);
+  // pinMode(GET_MOTHERBOARD_ON_STATE_GPIO, INPUT_PULLUP);
+  // pinMode(GET_MOTHERBOARD_POWER_STATE_GPIO, INPUT_PULLUP);
+  digitalWrite(RESET_CMD_GPIO, OPEN_SW);
+  digitalWrite(POWER_CMD_GPIO, OPEN_SW);
 }
 void calc_system_state()
 {
-  if (get_motherboard_ON_state() == SWITCH_ON)
+  // When PSU state monitoring is enabled, use both ON and POWER sensors.
+#if use_PSU_state
+  if (get_motherboard_ON_state() == ON_STATE)
   {
-    if (get_motherboard_POWER_state() == SWITCH_ON)
+    if (get_motherboard_POWER_state() == ON_STATE)
     {
       systemState = MOTHERBOARD_ON;
     }
@@ -117,7 +149,7 @@ void calc_system_state()
   }
   else
   {
-    if (get_motherboard_POWER_state() == SWITCH_ON)
+    if (get_motherboard_POWER_state() == ON_STATE)
     {
       systemState = MOTHERBOARD_POWERED;
     }
@@ -126,69 +158,79 @@ void calc_system_state()
       systemState = MOTHERBOARD_NOT_POWERED;
     }
   }
+#else
+  // PSU monitoring disabled: determine ON vs NOT_POWERED from ON sensor only.
+  if (get_motherboard_ON_state() == ON_STATE)
+  {
+    systemState = MOTHERBOARD_ON;
+  }
+  else
+  {
+    systemState = MOTHERBOARD_NOT_POWERED;
+  }
+#endif
 }
 
 // ~~~~~~~ Create iot instance ~~~~~~~
-void extMQTT(char *incoming_msg, char *_topic)
+void cmd_status()
 {
-  char msg[270];
-  if (strcmp(incoming_msg, "status") == 0)
-  {
-    sprintf(msg, "[Status]: %s", systemStateStr[systemState]);
-    iot.pub_msg(msg);
-  }
-  else if (strcmp(incoming_msg, "help2") == 0)
-  {
-    sprintf(msg, "help #2:{status; help2; ver2; poweroff; poweron; reset}");
-    iot.pub_msg(msg);
-  }
-  else if (strcmp(incoming_msg, "ver2") == 0)
-  {
-    sprintf(msg, "ver #2: %s", verApp);
-    iot.pub_msg(msg);
-  }
-  else if (strcmp(incoming_msg, "poweroff") == 0)
-  {
-    if (send_PowerOFF_cmd())
-    {
-      sprintf(msg, "[Commands]: PowerOFF command sent successfully");
-    }
-    else
-    {
-      sprintf(msg, "[Commands]: PowerOFF command failed");
-    }
-    iot.pub_msg(msg);
-  }
-  else if (strcmp(incoming_msg, "poweron") == 0)
-  {
-    if (send_PowerON_cmd())
-    {
-      sprintf(msg, "[Commands]: PowerON command sent successfully");
-    }
-    else
-    {
-      sprintf(msg, "[Commands]: PowerON command failed");
-    }
-    iot.pub_msg(msg);
-  }
-  else if (strcmp(incoming_msg, "reset") == 0)
-  {
-    if (send_Reset_cmd())
-    {
-      sprintf(msg, "[Commands]: Reset command sent successfully");
-    }
-    else
-    {
-      sprintf(msg, "[Commands]: Reset command failed");
-    }
-    iot.pub_msg(msg);
-  }
-  else if (strcmp(incoming_msg, "debug") == 0)
-  {
-    sprintf(msg, "[debug]: ON=%s, POWER=%s, POWER_SW=%s, RESET_SW=%s", get_motherboard_ON_state() == SWITCH_ON ? "ON" : "OFF", get_motherboard_POWER_state() == SWITCH_ON ? "ON" : "OFF", get_powerSW_state() == SWITCH_ON ? "ON" : "OFF", get_resetSW_state() == SWITCH_ON ? "ON" : "OFF");
-    iot.pub_debug(msg);
-  }
+  char msg[50];
+  snprintf(msg, sizeof(msg), "[Status]: %s", systemStateStr[systemState]);
+  iot.pub_msg(msg);
 }
+void cmd_help()
+{
+  iot.pub_msg("help #2:{status; help2; ver2; poweroff; poweron; reset}");
+}
+void cmd_ver()
+{
+  char msg[50];
+  snprintf(msg, sizeof(msg), "ver #2: %s", verApp);
+  iot.pub_msg(msg);
+}
+void cmd_poweroff()
+{
+  iot.pub_msg(send_PowerOFF_cmd() ? "[Commands]: PowerOFF sent" : "[Commands]: PowerOFF failed");
+}
+void cmd_poweron()
+{
+  iot.pub_msg(send_PowerON_cmd() ? "[Commands]: PowerON sent" : "[Commands]: PowerON failed");
+}
+void cmd_reset()
+{
+  iot.pub_msg(send_Reset_cmd() ? "[Commands]: Reset sent" : "[Commands]: Reset failed");
+}
+void cmd_debug()
+{
+  char msg[100];
+  snprintf(msg, sizeof(msg), "[debug]: ON=%s, POWER=%s, POWER_SW=%s, RESET_SW=%s",
+           get_motherboard_ON_state() == CLOSED_SW ? "ON" : "OFF",
+           get_motherboard_POWER_state() == CLOSED_SW ? "ON" : "OFF",
+           get_powerSW_state() == OPEN_SW ? "ON" : "OFF",
+           get_resetSW_state() == OPEN_SW ? "ON" : "OFF");
+  iot.pub_msg(msg);
+}
+
+// void extMQTT(char *incoming_msg, char *_topic)
+// {
+//   for (int i = 0; commands[i].name; i++)
+//     if (strcmp(incoming_msg, commands[i].name) == 0)
+//       return commands[i].handler();
+//       else{
+//         printf("[MQTT]: Received unknown command: %s topic[%s] \n", incoming_msg, _topic);
+//       }
+// }
+
+void extMQTT(char *incoming_msg, char *_topic) {
+  static uint8_t call_count = 0;
+  call_count++;
+  Serial.printf("[extMQTT call #%d]: %s\n", call_count, incoming_msg);
+  
+  for (int i = 0; commands[i].name; i++)
+    if (strcmp(incoming_msg, commands[i].name) == 0)
+      return commands[i].handler();
+}
+
 void start_iot2()
 {
   iot.useSerial = true;
@@ -240,14 +282,32 @@ void startService()
 }
 
 //~~~~~~~ Sketch Main ~~~~~~~
-
+// int i = 0;
 void setup()
 {
   startService();
+  // Serial.begin(115200);
 }
 void loop()
 {
-  calc_system_state();
-  iot.looper();
-  delay(50);
-}
+  // for (i = 0; i < 5; i++)
+  // {
+  //   pinMode(gpios[i], OUTPUT);
+  //   Serial.printf("GPIO %d:\n", gpios[i]);
+  //   digitalWrite(gpios[i], HIGH);
+  //   delay(1000);
+  //   digitalWrite(gpios[i], LOW);
+  //   delay(1000);
+  // }
+  // delay(5000);
+
+
+    // unsigned long now = millis();
+    //   if (now - lastCalc >= calcInterval) {
+    //   lastCalc = now;
+    //   calc_system_state();
+    // }
+
+    iot.looper();
+    delay(50);
+  }
