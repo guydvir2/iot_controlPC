@@ -9,7 +9,7 @@
 #define GET_MOTHERBOARD_POWER_STATE_GPIO 13
 
 #define LONG_PRESS_MS 4500
-#define SHORT_PRESS_MS 1000
+#define SHORT_PRESS_MS 500
 
 #define RESET_DURATION_MS SHORT_PRESS_MS
 #define POWEROFF_DURATION_MS LONG_PRESS_MS
@@ -19,8 +19,6 @@
 #define CLOSED_SW !OPEN_SW
 #define ON_STATE HIGH
 #define OFF_STATE LOW
-
-// int gpios[] = {4, 12, 13, 14};פם'קרםככ
 
 unsigned long lastCalc = 0;
 const unsigned long calcInterval = 50;
@@ -44,8 +42,8 @@ struct Command
     {"status", cmd_status},
     {"help2", cmd_help},
     {"ver2", cmd_ver},
-    {"poweroff", cmd_poweroff},
-    {"poweron", cmd_poweron},
+    {"poweroff_cmd", cmd_poweroff},
+    {"poweron_cmd", cmd_poweron},
     {"reset_cmd", cmd_reset},
     {"debug", cmd_debug},
     {nullptr, nullptr}};
@@ -57,11 +55,12 @@ enum SystemStates
   MOTHERBOARD_NOT_POWERED = 0,
   MOTHERBOARD_POWERED = 1,
   MOTHERBOARD_ON = 2,
-  ERROR_STATE = 3
+  ERROR_STATE = 3,
+  UNKNOWN = 4
 };
 SystemStates systemState = MOTHERBOARD_NOT_POWERED;
 
-const char *systemStateStr[] = {"NOT_POWERED", "POWERED", "ON", "ERROR"};
+const char *systemStateStr[] = {"NOT_POWERED", "POWERED", "ON", "ERROR", "UNKNOWN"};
 
 // ~~~~~~~ Init & loop functions ~~~~~~~
 void generic_Press_cmd(uint8_t gpio, int press_duration)
@@ -80,39 +79,36 @@ bool get_resetSW_state()
 }
 bool send_PowerON_cmd()
 {
-  // If PSU monitoring enabled, require power-SW + POWERED state.
-  // If disabled, allow power-on when not already ON.
-  // if ((use_PSU_state && get_powerSW_state() == OPEN_SW && systemState == MOTHERBOARD_POWERED) ||
-  //     (!use_PSU_state && systemState != MOTHERBOARD_ON))
-  // {
+  if (get_powerSW_state() == OPEN_SW &&
+          (use_PSU_state && systemState == MOTHERBOARD_POWERED) ||
+      (!use_PSU_state && systemState == UNKNOWN))
+  {
     generic_Press_cmd(POWER_CMD_GPIO, POWERON_DURATION_MS);
     return true;
-  // }
-  // return false;
+  }
+  return false;
 }
 bool send_PowerOFF_cmd()
 {
-  // If PSU monitoring enabled, require power-SW + ON state.
-  // If disabled, allow power-off when the system reports ON.
-  // if ((use_PSU_state && get_powerSW_state() == OPEN_SW && systemState == MOTHERBOARD_ON) ||
-  //     (!use_PSU_state && systemState == MOTHERBOARD_ON))
-  // {
+  if (get_powerSW_state() == OPEN_SW &&
+          (use_PSU_state && systemState == MOTHERBOARD_ON) ||
+      (!use_PSU_state && systemState == UNKNOWN))
+  {
     generic_Press_cmd(POWER_CMD_GPIO, POWEROFF_DURATION_MS);
     return true;
-  // }
-  // return false;
+  }
+  return false;
 }
 bool send_Reset_cmd()
 {
-  // Reset requires reset-SW to be available. If PSU monitoring enabled,
-  // allow reset when ON or POWERED. If disabled, allow only when ON.
-  // if (get_resetSW_state() == OPEN_SW &&
-  //     (systemState == MOTHERBOARD_ON || (use_PSU_state && systemState == MOTHERBOARD_POWERED)))
-  // {
+  if ((get_resetSW_state() == OPEN_SW) &&
+      (use_PSU_state && (systemState == MOTHERBOARD_ON || (use_PSU_state && systemState == MOTHERBOARD_POWERED)) ||
+       (!use_PSU_state && systemState == UNKNOWN)))
+  {
     generic_Press_cmd(RESET_CMD_GPIO, SHORT_PRESS_MS);
     return true;
-  // }
-  // return false;
+  }
+  return false;
 }
 bool get_motherboard_ON_state()
 {
@@ -127,10 +123,13 @@ void init_GPIOs()
 {
   pinMode(RESET_CMD_GPIO, OUTPUT);
   pinMode(POWER_CMD_GPIO, OUTPUT);
-  // pinMode(GET_MOTHERBOARD_ON_STATE_GPIO, INPUT_PULLUP);
-  // pinMode(GET_MOTHERBOARD_POWER_STATE_GPIO, INPUT_PULLUP);
   digitalWrite(RESET_CMD_GPIO, OPEN_SW);
   digitalWrite(POWER_CMD_GPIO, OPEN_SW);
+
+#if use_PSU_state
+  pinMode(GET_MOTHERBOARD_ON_STATE_GPIO, INPUT_PULLUP);
+  pinMode(GET_MOTHERBOARD_POWER_STATE_GPIO, INPUT_PULLUP);
+#endif
 }
 void calc_system_state()
 {
@@ -160,14 +159,15 @@ void calc_system_state()
   }
 #else
   // PSU monitoring disabled: determine ON vs NOT_POWERED from ON sensor only.
-  if (get_motherboard_ON_state() == ON_STATE)
-  {
-    systemState = MOTHERBOARD_ON;
-  }
-  else
-  {
-    systemState = MOTHERBOARD_NOT_POWERED;
-  }
+  // if (get_motherboard_ON_state() == ON_STATE)
+  // {
+  //   systemState = MOTHERBOARD_ON;
+  // }
+  // else
+  // {
+  //   systemState = MOTHERBOARD_NOT_POWERED;
+  // }
+  systemState = UNKNOWN;
 #endif
 }
 
@@ -180,7 +180,7 @@ void cmd_status()
 }
 void cmd_help()
 {
-  iot.pub_msg("help #2:{status; help2; ver2; poweroff; poweron; reset}");
+  iot.pub_msg("help #2:{status; help2; ver2; poweroff_cmd; poweron_cmd; reset_cmd}");
 }
 void cmd_ver()
 {
@@ -211,21 +211,8 @@ void cmd_debug()
   iot.pub_msg(msg);
 }
 
-// void extMQTT(char *incoming_msg, char *_topic)
-// {
-//   for (int i = 0; commands[i].name; i++)
-//     if (strcmp(incoming_msg, commands[i].name) == 0)
-//       return commands[i].handler();
-//       else{
-//         printf("[MQTT]: Received unknown command: %s topic[%s] \n", incoming_msg, _topic);
-//       }
-// }
-
-void extMQTT(char *incoming_msg, char *_topic) {
-  static uint8_t call_count = 0;
-  call_count++;
-  Serial.printf("[extMQTT call #%d]: %s\n", call_count, incoming_msg);
-  
+void extMQTT(char *incoming_msg, char *_topic)
+{
   for (int i = 0; commands[i].name; i++)
     if (strcmp(incoming_msg, commands[i].name) == 0)
       return commands[i].handler();
@@ -282,32 +269,18 @@ void startService()
 }
 
 //~~~~~~~ Sketch Main ~~~~~~~
-// int i = 0;
 void setup()
 {
   startService();
-  // Serial.begin(115200);
 }
 void loop()
 {
-  // for (i = 0; i < 5; i++)
-  // {
-  //   pinMode(gpios[i], OUTPUT);
-  //   Serial.printf("GPIO %d:\n", gpios[i]);
-  //   digitalWrite(gpios[i], HIGH);
-  //   delay(1000);
-  //   digitalWrite(gpios[i], LOW);
-  //   delay(1000);
-  // }
-  // delay(5000);
-
-
-    // unsigned long now = millis();
-    //   if (now - lastCalc >= calcInterval) {
-    //   lastCalc = now;
-    //   calc_system_state();
-    // }
-
-    iot.looper();
-    delay(50);
+  unsigned long now = millis();
+  if (now - lastCalc >= calcInterval)
+  {
+    lastCalc = now;
+    calc_system_state();
   }
+
+  iot.looper();
+}
