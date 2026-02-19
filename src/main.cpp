@@ -1,27 +1,9 @@
 #include <Arduino.h>
 #include <myIOT2.h>
+#include "config.h"
 
-#define use_PSU_state false
 
-#define RESET_CMD_GPIO 4
-#define POWER_CMD_GPIO 12
-#define GET_MOTHERBOARD_ON_STATE_GPIO 12
-#define GET_MOTHERBOARD_POWER_STATE_GPIO 13
-
-#define LONG_PRESS_MS 4500
-#define SHORT_PRESS_MS 500
-
-#define RESET_DURATION_MS SHORT_PRESS_MS
-#define POWEROFF_DURATION_MS LONG_PRESS_MS
-#define POWERON_DURATION_MS SHORT_PRESS_MS
-
-#define OPEN_SW LOW
-#define CLOSED_SW !OPEN_SW
-#define ON_STATE HIGH
-#define OFF_STATE LOW
-
-unsigned long lastCalc = 0;
-const unsigned long calcInterval = 50;
+unsigned long lastLoop_millis = 0;
 const char *verApp = "iot_ControlPC_v0.2";
 
 typedef void (*CommandHandler)(void);
@@ -48,6 +30,15 @@ struct Command
     {"debug", cmd_debug},
     {nullptr, nullptr}};
 
+// Structure to track non-blocking GPIO press state
+struct GPIOPressState
+{
+  uint8_t gpio;
+  unsigned long startTime;
+  int duration;
+  bool isActive;
+} gpioPressState = {0, 0, 0, false};
+
 myIOT2 iot;
 
 enum SystemStates
@@ -65,9 +56,29 @@ const char *systemStateStr[] = {"NOT_POWERED", "POWERED", "ON", "ERROR", "UNKNOW
 // ~~~~~~~ Init & loop functions ~~~~~~~
 void generic_Press_cmd(uint8_t gpio, int press_duration)
 {
-  digitalWrite(gpio, CLOSED_SW);
-  delay(press_duration);
-  digitalWrite(gpio, OPEN_SW);
+  // Non-blocking GPIO press: initiates the press
+  if (!gpioPressState.isActive)
+  {
+    gpioPressState.gpio = gpio;
+    gpioPressState.startTime = millis();
+    gpioPressState.duration = press_duration;
+    gpioPressState.isActive = true;
+    digitalWrite(gpio, CLOSED_SW);
+  }
+}
+
+void update_genericPress_state()
+{
+  // Non-blocking GPIO press: checks and releases when duration elapsed
+  if (gpioPressState.isActive)
+  {
+    unsigned long elapsed = millis() - gpioPressState.startTime;
+    if (elapsed >= gpioPressState.duration)
+    {
+      digitalWrite(gpioPressState.gpio, OPEN_SW);
+      gpioPressState.isActive = false;
+    }
+  }
 }
 bool get_powerSW_state()
 {
@@ -79,9 +90,8 @@ bool get_resetSW_state()
 }
 bool send_PowerON_cmd()
 {
-  if (get_powerSW_state() == OPEN_SW &&
-          (use_PSU_state && systemState == MOTHERBOARD_POWERED) ||
-      (!use_PSU_state && systemState == UNKNOWN))
+  if (get_powerSW_state() == OPEN_SW && ((use_PSU_state && systemState == MOTHERBOARD_POWERED) ||
+      (!use_PSU_state && systemState == UNKNOWN)))
   {
     generic_Press_cmd(POWER_CMD_GPIO, POWERON_DURATION_MS);
     return true;
@@ -90,9 +100,8 @@ bool send_PowerON_cmd()
 }
 bool send_PowerOFF_cmd()
 {
-  if (get_powerSW_state() == OPEN_SW &&
-          (use_PSU_state && systemState == MOTHERBOARD_ON) ||
-      (!use_PSU_state && systemState == UNKNOWN))
+  if (get_powerSW_state() == OPEN_SW && ((use_PSU_state && systemState == MOTHERBOARD_ON) ||
+      (!use_PSU_state && systemState == UNKNOWN)))
   {
     generic_Press_cmd(POWER_CMD_GPIO, POWEROFF_DURATION_MS);
     return true;
@@ -102,7 +111,7 @@ bool send_PowerOFF_cmd()
 bool send_Reset_cmd()
 {
   if ((get_resetSW_state() == OPEN_SW) &&
-      (use_PSU_state && (systemState == MOTHERBOARD_ON || (use_PSU_state && systemState == MOTHERBOARD_POWERED)) ||
+      ((use_PSU_state && (systemState == MOTHERBOARD_ON || systemState == MOTHERBOARD_POWERED)) ||
        (!use_PSU_state && systemState == UNKNOWN)))
   {
     generic_Press_cmd(RESET_CMD_GPIO, SHORT_PRESS_MS);
@@ -126,10 +135,9 @@ void init_GPIOs()
   digitalWrite(RESET_CMD_GPIO, OPEN_SW);
   digitalWrite(POWER_CMD_GPIO, OPEN_SW);
 
-#if use_PSU_state
+  // Always configure input GPIOs regardless of use_PSU_state
   pinMode(GET_MOTHERBOARD_ON_STATE_GPIO, INPUT_PULLUP);
   pinMode(GET_MOTHERBOARD_POWER_STATE_GPIO, INPUT_PULLUP);
-#endif
 }
 void calc_system_state()
 {
@@ -159,19 +167,17 @@ void calc_system_state()
   }
 #else
   // PSU monitoring disabled: determine ON vs NOT_POWERED from ON sensor only.
-  // if (get_motherboard_ON_state() == ON_STATE)
-  // {
-  //   systemState = MOTHERBOARD_ON;
-  // }
-  // else
-  // {
-  //   systemState = MOTHERBOARD_NOT_POWERED;
-  // }
-  systemState = UNKNOWN;
+  if (get_motherboard_ON_state() == ON_STATE)
+  {
+    systemState = MOTHERBOARD_ON;
+  }
+  else
+  {
+    systemState = UNKNOWN;
+  }
 #endif
 }
 
-// ~~~~~~~ Create iot instance ~~~~~~~
 void cmd_status()
 {
   char msg[50];
@@ -217,7 +223,6 @@ void extMQTT(char *incoming_msg, char *_topic)
     if (strcmp(incoming_msg, commands[i].name) == 0)
       return commands[i].handler();
 }
-
 void start_iot2()
 {
   iot.useSerial = true;
@@ -261,7 +266,6 @@ void start_iot2()
 
   iot.start_services(extMQTT);
 }
-
 void startService()
 {
   init_GPIOs();
@@ -276,11 +280,11 @@ void setup()
 void loop()
 {
   unsigned long now = millis();
-  if (now - lastCalc >= calcInterval)
+  if (now - lastLoop_millis >= LOOP_DELAY_MS)
   {
-    lastCalc = now;
+    lastLoop_millis = now;
     calc_system_state();
   }
-
+  update_genericPress_state(); // Update non-blocking press state
   iot.looper();
 }
